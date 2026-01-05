@@ -13,6 +13,7 @@ from app.models.async_operation import AsyncOperation, OperationStatus, Operatio
 from app.models.chat import ChatMessage, ChatThread
 from app.models.paper import Paper, PaperStatus
 from app.services.research_context_service import ResearchContextService
+from app.services.pdf_service import pdf_service
 
 
 class ClaudeService:
@@ -52,12 +53,20 @@ class ClaudeService:
         if not paper:
             return {"error": "Paper not found"}
 
+        # Extract PDF text if available
+        pdf_text = ""
+        if paper.pdf_url:
+            try:
+                pdf_text = pdf_service.extract_text(paper.pdf_url, max_chars=80000)
+            except Exception as e:
+                pdf_text = f"[Could not extract PDF text: {e}]"
+
         # Get research context
         context_service = ResearchContextService(self.session)
         context_summary = await context_service.get_context_summary(user_id)
 
-        # Build prompt
-        prompt = self._build_review_prompt(paper, context_summary)
+        # Build prompt with PDF content
+        prompt = self._build_review_prompt(paper, context_summary, pdf_text)
 
         # Call Claude API
         response = await self.client.messages.create(
@@ -225,8 +234,15 @@ class ClaudeService:
             "paper_count": len(papers),
         }
 
-    def _build_review_prompt(self, paper: Paper, context_summary: str) -> str:
+    def _build_review_prompt(self, paper: Paper, context_summary: str, pdf_text: str = "") -> str:
         """Build the prompt for paper review."""
+        pdf_section = ""
+        if pdf_text:
+            pdf_section = f"""
+## Full Paper Content
+{pdf_text}
+"""
+
         return f"""You are reviewing an academic paper for a researcher. Your goal is to:
 1. Summarize the key contributions
 2. Assess relevance to the researcher's active work
@@ -242,7 +258,7 @@ Authors: {', '.join(paper.authors)}
 Year: {paper.year or 'Unknown'}
 Venue: {paper.venue or 'Unknown'}
 Abstract: {paper.abstract or 'Not available'}
-
+{pdf_section}
 ## Your Task
 Provide a structured review in JSON format with these fields:
 - "summary": 2-3 paragraph summary of what the paper does and what's novel
@@ -254,7 +270,7 @@ Provide a structured review in JSON format with these fields:
 - "suggested_tags": array of topic tags
 - "discussion_questions": 2-3 questions to seed collaborative discussion
 
-Be specific and substantive. Reference specific sections, results, or claims where possible."""
+Be specific and substantive. Reference specific sections, results, or claims from the paper."""
 
     def _parse_review_response(self, response_text: str) -> dict[str, Any]:
         """Parse Claude's review response into structured format."""

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
@@ -9,26 +9,44 @@ import {
   Send,
   Lightbulb,
   ExternalLink,
+  Upload,
 } from 'lucide-react';
 import { papersApi, chatApi, syncApi } from '../services/api';
-import type { ChatMessage } from '../types';
+import type { ChatMessage, Annotation as AnnotationType } from '../types';
+import PDFViewer from '../components/pdf/PDFViewer';
+import TextSelectionPopover from '../components/pdf/TextSelectionPopover';
 import clsx from 'clsx';
 
 type TabType = 'review' | 'annotations' | 'chat';
+
+interface SelectionState {
+  text: string;
+  pageNumber: number;
+  position: { x: number; y: number };
+  rects: Array<{ x: number; y: number; width: number; height: number }>;
+}
 
 export default function PaperView() {
   const { paperId } = useParams<{ paperId: string }>();
   const [activeTab, setActiveTab] = useState<TabType>('review');
   const [chatMessage, setChatMessage] = useState('');
+  const [selection, setSelection] = useState<SelectionState | null>(null);
   const queryClient = useQueryClient();
 
   const { data: paper, isLoading: paperLoading } = useQuery({
     queryKey: ['paper', paperId],
     queryFn: () => papersApi.get(paperId!),
     enabled: !!paperId,
+    refetchInterval: (data) => {
+      // Poll while paper is processing
+      if (data?.status === 'processing') {
+        return 5000;
+      }
+      return false;
+    },
   });
 
-  const { data: annotations } = useQuery({
+  const { data: annotations, refetch: refetchAnnotations } = useQuery({
     queryKey: ['annotations', paperId],
     queryFn: () => papersApi.getAnnotations(paperId!),
     enabled: !!paperId,
@@ -43,7 +61,7 @@ export default function PaperView() {
   // Get or create a chat thread for this paper
   const thread = threads?.[0];
 
-  const { data: messages } = useQuery({
+  const { data: messages, refetch: refetchMessages } = useQuery({
     queryKey: ['messages', thread?.id],
     queryFn: () => chatApi.getMessages(thread!.id),
     enabled: !!thread,
@@ -61,15 +79,38 @@ export default function PaperView() {
   });
 
   const sendMessageMutation = useMutation({
-    mutationFn: (content: string) => {
-      if (!thread) {
-        throw new Error('No thread available');
+    mutationFn: async (content: string) => {
+      let threadId = thread?.id;
+      if (!threadId) {
+        const newThread = await chatApi.createThread({
+          context_type: 'paper',
+          paper_id: paperId,
+        });
+        threadId = newThread.id;
+        queryClient.invalidateQueries({ queryKey: ['threads', paperId] });
       }
-      return chatApi.sendMessage(thread.id, content);
+      return chatApi.sendMessage(threadId, content);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['messages', thread?.id] });
+      refetchMessages();
       setChatMessage('');
+    },
+  });
+
+  const createAnnotationMutation = useMutation({
+    mutationFn: (data: { type: string; content: string; pageNumber: number; selectedText?: string; position?: any }) =>
+      papersApi.createAnnotation(paperId!, {
+        author: 'user',
+        type: data.type as 'highlight' | 'note' | 'question',
+        page_number: data.pageNumber,
+        selected_text: data.selectedText,
+        content: data.content,
+        position: data.position,
+        thread_id: null,
+      }),
+    onSuccess: () => {
+      refetchAnnotations();
+      setSelection(null);
     },
   });
 
@@ -77,15 +118,61 @@ export default function PaperView() {
     mutationFn: () => syncApi.saveLiteratureNote(paperId!),
   });
 
+  const handleTextSelect = useCallback(
+    (text: string, pageNumber: number, position: { rects: any[]; pageIndex: number }) => {
+      if (!text.trim()) return;
+
+      // Get position for popover (use center of first rect)
+      const firstRect = position.rects[0];
+      if (!firstRect) return;
+
+      setSelection({
+        text,
+        pageNumber,
+        position: { x: firstRect.x + firstRect.width / 2, y: firstRect.y + firstRect.height },
+        rects: position.rects,
+      });
+    },
+    []
+  );
+
+  const handleHighlight = () => {
+    if (!selection) return;
+    createAnnotationMutation.mutate({
+      type: 'highlight',
+      content: selection.text,
+      pageNumber: selection.pageNumber,
+      selectedText: selection.text,
+      position: { page_index: selection.pageNumber - 1, rects: selection.rects },
+    });
+  };
+
+  const handleAddNote = (note: string) => {
+    if (!selection) return;
+    createAnnotationMutation.mutate({
+      type: 'note',
+      content: note,
+      pageNumber: selection.pageNumber,
+      selectedText: selection.text,
+      position: { page_index: selection.pageNumber - 1, rects: selection.rects },
+    });
+  };
+
+  const handleAskClaude = () => {
+    if (!selection) return;
+    setActiveTab('chat');
+    setChatMessage(`Regarding this passage: "${selection.text.slice(0, 200)}${selection.text.length > 200 ? '...' : ''}"\n\n`);
+    setSelection(null);
+  };
+
   const handleSendMessage = () => {
     if (!chatMessage.trim()) return;
+    sendMessageMutation.mutate(chatMessage);
+  };
 
-    if (!thread) {
-      // Create thread first, then send message
-      createThreadMutation.mutate();
-    } else {
-      sendMessageMutation.mutate(chatMessage);
-    }
+  const handleAnnotationClick = (annotation: AnnotationType) => {
+    setActiveTab('annotations');
+    // Could scroll to annotation in list
   };
 
   if (paperLoading) {
@@ -108,11 +195,13 @@ export default function PaperView() {
   }
 
   const review = paper.claude_review;
+  const pdfUrl = papersApi.getPdfUrl(paperId!);
+  const hasPdf = paper.pdf_url && paper.pdf_url.length > 0;
 
   return (
     <div className="flex h-full">
-      {/* PDF Viewer placeholder */}
-      <div className="flex-1 bg-gray-100 flex flex-col">
+      {/* PDF Viewer */}
+      <div className="flex-1 flex flex-col">
         <div className="p-4 bg-white border-b border-gray-200 flex items-center gap-4">
           <Link
             to="/queue"
@@ -130,6 +219,13 @@ export default function PaperView() {
           </div>
 
           <div className="flex items-center gap-2">
+            {paper.status === 'processing' && (
+              <span className="flex items-center gap-1 px-3 py-1.5 text-sm bg-yellow-50 text-yellow-700 rounded-lg">
+                <span className="w-2 h-2 bg-yellow-500 rounded-full animate-pulse" />
+                Processing...
+              </span>
+            )}
+
             <button
               onClick={() => saveLiteNoteMutation.mutate()}
               disabled={saveLiteNoteMutation.isPending}
@@ -152,14 +248,50 @@ export default function PaperView() {
           </div>
         </div>
 
-        <div className="flex-1 flex items-center justify-center text-gray-400">
-          <div className="text-center">
-            <FileText size={64} className="mx-auto mb-4 opacity-50" />
-            <p>PDF Viewer</p>
-            <p className="text-sm">PDF rendering will be implemented here</p>
+        {hasPdf ? (
+          <PDFViewer
+            url={pdfUrl}
+            annotations={annotations || []}
+            onTextSelect={handleTextSelect}
+            onAnnotationClick={handleAnnotationClick}
+          />
+        ) : (
+          <div className="flex-1 flex items-center justify-center bg-gray-100">
+            <div className="text-center">
+              <FileText size={64} className="mx-auto mb-4 text-gray-300" />
+              <p className="text-gray-500 mb-4">No PDF available</p>
+              <label className="inline-flex items-center gap-2 px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 cursor-pointer">
+                <Upload size={18} />
+                Upload PDF
+                <input
+                  type="file"
+                  accept=".pdf"
+                  className="hidden"
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      await papersApi.uploadPdf(paperId!, file);
+                      queryClient.invalidateQueries({ queryKey: ['paper', paperId] });
+                    }
+                  }}
+                />
+              </label>
+            </div>
           </div>
-        </div>
+        )}
       </div>
+
+      {/* Text selection popover */}
+      {selection && (
+        <TextSelectionPopover
+          selectedText={selection.text}
+          position={selection.position}
+          onHighlight={handleHighlight}
+          onAddNote={handleAddNote}
+          onAskClaude={handleAskClaude}
+          onClose={() => setSelection(null)}
+        />
+      )}
 
       {/* Side panel */}
       <div className="w-96 border-l border-gray-200 bg-white flex flex-col">
@@ -167,7 +299,7 @@ export default function PaperView() {
         <div className="flex border-b border-gray-200">
           {[
             { id: 'review' as const, icon: Lightbulb, label: 'Review' },
-            { id: 'annotations' as const, icon: Bookmark, label: 'Annotations' },
+            { id: 'annotations' as const, icon: Bookmark, label: `Annotations (${annotations?.length || 0})` },
             { id: 'chat' as const, icon: MessageSquare, label: 'Chat' },
           ].map(({ id, icon: Icon, label }) => (
             <button
@@ -190,7 +322,13 @@ export default function PaperView() {
         <div className="flex-1 overflow-auto">
           {activeTab === 'review' && (
             <div className="p-4 space-y-4">
-              {review ? (
+              {paper.status === 'processing' ? (
+                <div className="text-center py-8">
+                  <div className="w-8 h-8 border-2 border-primary-600 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+                  <p className="text-gray-600">Claude is reviewing this paper...</p>
+                  <p className="text-sm text-gray-500 mt-1">This may take a few minutes</p>
+                </div>
+              ) : review ? (
                 <>
                   <div>
                     <h3 className="font-medium text-gray-900 mb-2">Summary</h3>
@@ -199,13 +337,13 @@ export default function PaperView() {
                     </p>
                   </div>
 
-                  {review.key_contributions.length > 0 && (
+                  {review.key_contributions?.length > 0 && (
                     <div>
                       <h3 className="font-medium text-gray-900 mb-2">
                         Key Contributions
                       </h3>
                       <ul className="space-y-1">
-                        {review.key_contributions.map((contrib, i) => (
+                        {review.key_contributions.map((contrib: string, i: number) => (
                           <li key={i} className="text-sm text-gray-700 flex gap-2">
                             <span className="text-primary-600">•</span>
                             {contrib}
@@ -226,16 +364,20 @@ export default function PaperView() {
                     </div>
                   )}
 
-                  {review.discussion_questions.length > 0 && (
+                  {review.discussion_questions?.length > 0 && (
                     <div>
                       <h3 className="font-medium text-gray-900 mb-2">
                         Discussion Questions
                       </h3>
                       <ul className="space-y-2">
-                        {review.discussion_questions.map((q, i) => (
+                        {review.discussion_questions.map((q: string, i: number) => (
                           <li
                             key={i}
-                            className="text-sm text-gray-700 p-2 bg-primary-50 rounded-lg"
+                            className="text-sm text-gray-700 p-2 bg-primary-50 rounded-lg cursor-pointer hover:bg-primary-100"
+                            onClick={() => {
+                              setActiveTab('chat');
+                              setChatMessage(q + '\n\n');
+                            }}
                           >
                             {q}
                           </li>
@@ -248,7 +390,7 @@ export default function PaperView() {
                 <div className="text-center py-8 text-gray-500">
                   <Lightbulb size={32} className="mx-auto mb-2 opacity-50" />
                   <p>No review yet</p>
-                  <p className="text-sm">Claude is processing this paper...</p>
+                  <p className="text-sm">Upload a PDF to generate a review</p>
                 </div>
               )}
             </div>
@@ -256,29 +398,34 @@ export default function PaperView() {
 
           {activeTab === 'annotations' && (
             <div className="p-4">
-              {annotations?.length === 0 ? (
+              {!annotations?.length ? (
                 <div className="text-center py-8 text-gray-500">
                   <Bookmark size={32} className="mx-auto mb-2 opacity-50" />
                   <p>No annotations yet</p>
-                  <p className="text-sm">Highlight text to add annotations</p>
+                  <p className="text-sm">Select text in the PDF to add annotations</p>
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {annotations?.map((ann) => (
+                  {annotations.map((ann) => (
                     <div
                       key={ann.id}
-                      className="p-3 bg-yellow-50 border border-yellow-200 rounded-lg"
+                      className={clsx(
+                        'p-3 rounded-lg border',
+                        ann.type === 'highlight' && 'bg-yellow-50 border-yellow-200',
+                        ann.type === 'note' && 'bg-blue-50 border-blue-200',
+                        ann.type === 'question' && 'bg-purple-50 border-purple-200'
+                      )}
                     >
                       <div className="flex items-center gap-2 mb-1">
-                        <span className="text-xs text-yellow-700">
+                        <span className="text-xs text-gray-500">
                           Page {ann.page_number}
                         </span>
-                        <span className="text-xs text-gray-400">
+                        <span className="text-xs px-1.5 py-0.5 bg-white rounded text-gray-600">
                           {ann.type}
                         </span>
                       </div>
                       {ann.selected_text && (
-                        <p className="text-sm text-gray-600 italic mb-2">
+                        <p className="text-sm text-gray-600 italic mb-2 line-clamp-2">
                           "{ann.selected_text}"
                         </p>
                       )}
@@ -293,7 +440,7 @@ export default function PaperView() {
           {activeTab === 'chat' && (
             <div className="flex flex-col h-full">
               <div className="flex-1 p-4 space-y-4 overflow-auto">
-                {messages?.length === 0 && (
+                {!messages?.length && (
                   <div className="text-center py-8 text-gray-500">
                     <MessageSquare size={32} className="mx-auto mb-2 opacity-50" />
                     <p>Start a conversation</p>
@@ -334,18 +481,23 @@ export default function PaperView() {
 
               <div className="p-4 border-t border-gray-200">
                 <div className="flex gap-2">
-                  <input
-                    type="text"
+                  <textarea
                     value={chatMessage}
                     onChange={(e) => setChatMessage(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSendMessage();
+                      }
+                    }}
                     placeholder="Ask about this paper..."
-                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
+                    rows={2}
+                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 resize-none"
                   />
                   <button
                     onClick={handleSendMessage}
                     disabled={!chatMessage.trim() || sendMessageMutation.isPending}
-                    className="p-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50"
+                    className="p-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50 self-end"
                   >
                     <Send size={20} />
                   </button>

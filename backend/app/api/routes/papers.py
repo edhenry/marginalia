@@ -1,8 +1,9 @@
 """Paper-related API routes."""
 
+import json
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -54,16 +55,12 @@ def _paper_to_response(paper) -> PaperResponse:
 async def create_paper(
     session: SessionDep,
     paper_data: PaperCreate,
-    pdf_file: UploadFile | None = File(None),
     trigger_review: bool = Query(True, description="Queue Claude review immediately"),
 ):
-    """Create a new paper."""
+    """Create a new paper from JSON data."""
     service = PaperService(session)
 
-    pdf_binary = pdf_file.file if pdf_file else None
-    pdf_filename = pdf_file.filename if pdf_file else None
-
-    paper = await service.create_paper(paper_data, pdf_binary, pdf_filename)
+    paper = await service.create_paper(paper_data, None, None)
 
     # Queue Claude review if requested
     if trigger_review:
@@ -71,6 +68,83 @@ async def create_paper(
         await claude_service.queue_paper_review(paper.id, "default_user")
 
     return _paper_to_response(paper)
+
+
+@router.post("/upload", response_model=PaperResponse)
+async def upload_paper(
+    session: SessionDep,
+    pdf_file: UploadFile = File(...),
+    title: str = Form(...),
+    authors: str = Form(""),  # JSON array as string
+    venue: str | None = Form(None),
+    year: int | None = Form(None),
+    abstract: str | None = Form(None),
+    source_url: str | None = Form(None),
+    source_id: str | None = Form(None),
+    tags: str = Form(""),  # JSON array as string
+    trigger_review: bool = Form(True),
+):
+    """Upload a paper with PDF file."""
+    service = PaperService(session)
+
+    # Parse JSON arrays
+    try:
+        authors_list = json.loads(authors) if authors else []
+    except json.JSONDecodeError:
+        authors_list = [a.strip() for a in authors.split(",") if a.strip()]
+
+    try:
+        tags_list = json.loads(tags) if tags else []
+    except json.JSONDecodeError:
+        tags_list = [t.strip() for t in tags.split(",") if t.strip()]
+
+    paper_data = PaperCreate(
+        title=title,
+        authors=authors_list,
+        venue=venue,
+        year=year,
+        abstract=abstract,
+        source_url=source_url,
+        source_id=source_id,
+        tags=tags_list,
+    )
+
+    paper = await service.create_paper(paper_data, pdf_file.file, pdf_file.filename)
+
+    # Queue Claude review if requested
+    if trigger_review:
+        claude_service = ClaudeService(session)
+        await claude_service.queue_paper_review(paper.id, "default_user")
+
+    return _paper_to_response(paper)
+
+
+@router.post("/{paper_id}/pdf")
+async def upload_pdf_for_paper(
+    session: SessionDep,
+    paper_id: str,
+    pdf_file: UploadFile = File(...),
+    trigger_review: bool = Query(True),
+):
+    """Upload or replace PDF for an existing paper."""
+    from app.services.sync_service import SyncService
+
+    service = PaperService(session)
+    paper = await service.get_paper(paper_id)
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    # Store the PDF
+    pdf_path = await service._store_pdf(paper_id, pdf_file.file, pdf_file.filename)
+    paper.pdf_url = pdf_path
+    await session.flush()
+
+    # Queue Claude review if requested
+    if trigger_review and paper.status in [PaperStatus.NEW, PaperStatus.PROCESSING]:
+        claude_service = ClaudeService(session)
+        await claude_service.queue_paper_review(paper.id, "default_user")
+
+    return {"success": True, "pdf_path": pdf_path}
 
 
 @router.get("", response_model=list[PaperResponse])

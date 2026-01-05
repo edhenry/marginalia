@@ -65,6 +65,63 @@ export const papersApi = {
       body: JSON.stringify(paperIds),
     }),
 
+  // PDF URL for viewer
+  getPdfUrl: (paperId: string) => `${API_BASE}/papers/${paperId}/pdf`,
+
+  // Upload paper with PDF
+  uploadPaper: async (
+    pdfFile: File,
+    metadata: {
+      title: string;
+      authors?: string[];
+      venue?: string;
+      year?: number;
+      abstract?: string;
+      tags?: string[];
+    },
+    triggerReview = true
+  ): Promise<Paper> => {
+    const formData = new FormData();
+    formData.append('pdf_file', pdfFile);
+    formData.append('title', metadata.title);
+    formData.append('authors', JSON.stringify(metadata.authors || []));
+    if (metadata.venue) formData.append('venue', metadata.venue);
+    if (metadata.year) formData.append('year', metadata.year.toString());
+    if (metadata.abstract) formData.append('abstract', metadata.abstract);
+    formData.append('tags', JSON.stringify(metadata.tags || []));
+    formData.append('trigger_review', triggerReview.toString());
+
+    const response = await fetch(`${API_BASE}/papers/upload`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+      throw new Error(error.detail || `HTTP error ${response.status}`);
+    }
+
+    return response.json();
+  },
+
+  // Upload PDF for existing paper
+  uploadPdf: async (paperId: string, pdfFile: File): Promise<{ success: boolean }> => {
+    const formData = new FormData();
+    formData.append('pdf_file', pdfFile);
+
+    const response = await fetch(`${API_BASE}/papers/${paperId}/pdf`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+      throw new Error(error.detail || `HTTP error ${response.status}`);
+    }
+
+    return response.json();
+  },
+
   getAnnotations: (paperId: string) =>
     fetchApi<Annotation[]>(`/papers/${paperId}/annotations`),
 

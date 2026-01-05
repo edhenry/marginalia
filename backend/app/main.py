@@ -1,23 +1,46 @@
 """Main FastAPI application."""
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import papers_router, context_router, chat_router, sync_router
 from app.core.config import settings
 from app.core.database import init_db
+from app.services.task_worker import task_worker, setup_task_handlers
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     # Startup
+    logger.info("Starting Marginalia...")
     await init_db()
+
+    # Set up and start background task worker
+    await setup_task_handlers()
+    await task_worker.start()
+    logger.info("Background task worker started")
+
+    # Ensure storage directories exist
+    settings.storage_path.mkdir(parents=True, exist_ok=True)
+    settings.pdf_storage_path.mkdir(parents=True, exist_ok=True)
+
     yield
+
     # Shutdown
-    pass
+    logger.info("Shutting down Marginalia...")
+    await task_worker.stop()
 
 
 app = FastAPI(
