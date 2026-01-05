@@ -109,6 +109,8 @@ async def import_from_arxiv(
     request: ArxivImportRequest,
 ):
     """Import a paper from arXiv."""
+    from app.services.claude_service import ClaudeService
+
     sync_service = SyncService(session)
     paper_service = PaperService(session)
 
@@ -135,6 +137,11 @@ async def import_from_arxiv(
         paper_data["pdf_url"],
         paper.id,
     )
+
+    # Queue Claude review after PDF is fetched
+    if "error" not in pdf_result:
+        claude_service = ClaudeService(session)
+        await claude_service.queue_paper_review(paper.id, "default_user")
 
     return {
         "success": True,

@@ -133,21 +133,117 @@ async def setup_task_handlers():
 
     async def handle_pattern_analysis(session: AsyncSession, input_data: dict) -> dict:
         """Handle pattern analysis operation."""
-        from app.services.claude_service import ClaudeService
+        from app.models.paper import Paper, PaperStatus
+        from anthropic import AsyncAnthropic
+        from app.core.config import settings
+        import json
 
-        claude_service = ClaudeService(session)
         user_id = input_data.get("user_id", "default_user")
 
-        # Get reading history and papers
+        # Get reading history
         context_service = ResearchContextService(session)
-        reading_events = await context_service.get_reading_history(user_id, limit=20)
+        reading_events = await context_service.get_reading_history(user_id, limit=30)
 
-        if not reading_events:
+        if len(reading_events) < 3:
             return {"patterns": [], "message": "Not enough reading history for pattern analysis"}
 
-        # Analyze patterns using Claude
-        # This is a simplified implementation
-        return {"patterns": [], "message": "Pattern analysis completed"}
+        # Get papers from reading history
+        paper_ids = list(set(e.paper_id for e in reading_events))
+        result = await session.execute(
+            select(Paper).where(Paper.id.in_(paper_ids))
+        )
+        papers = list(result.scalars().all())
+
+        if len(papers) < 3:
+            return {"patterns": [], "message": "Not enough papers for pattern analysis"}
+
+        # Get research context
+        context_summary = await context_service.get_context_summary(user_id)
+
+        # Build prompt for Claude
+        paper_summaries = []
+        for p in papers:
+            summary = f"- {p.title}"
+            if p.claude_review:
+                summary += f"\n  Summary: {p.claude_review.get('summary', '')[:300]}"
+                if p.claude_review.get('key_contributions'):
+                    summary += f"\n  Key points: {', '.join(p.claude_review.get('key_contributions', [])[:3])}"
+            paper_summaries.append(summary)
+
+        prompt = f"""Analyze the following papers from a researcher's reading history and identify any emerging patterns, themes, or connections.
+
+## Research Context
+{context_summary}
+
+## Recent Papers Read
+{chr(10).join(paper_summaries)}
+
+## Your Task
+Identify 1-3 meaningful patterns across these papers. For each pattern, provide:
+1. A clear description of the pattern or theme
+2. Which papers relate to this pattern
+
+Respond in JSON format:
+{{
+    "patterns": [
+        {{
+            "description": "Description of the pattern",
+            "paper_titles": ["Paper 1 title", "Paper 2 title"]
+        }}
+    ]
+}}
+
+Focus on substantive intellectual connections, not superficial similarities."""
+
+        # Call Claude API
+        if not settings.anthropic_api_key:
+            return {"patterns": [], "message": "Claude API not configured"}
+
+        client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+        response = await client.messages.create(
+            model=settings.claude_model,
+            max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        # Parse response
+        response_text = response.content[0].text
+        try:
+            start = response_text.find("{")
+            end = response_text.rfind("}") + 1
+            if start != -1 and end > start:
+                data = json.loads(response_text[start:end])
+                patterns_data = data.get("patterns", [])
+
+                # Create patterns in database
+                created_patterns = []
+                for pattern_info in patterns_data[:3]:  # Limit to 3 patterns
+                    # Find paper IDs from titles
+                    pattern_paper_ids = []
+                    for title in pattern_info.get("paper_titles", []):
+                        for p in papers:
+                            if title.lower() in p.title.lower():
+                                pattern_paper_ids.append(p.id)
+                                break
+
+                    pattern = await context_service.create_pattern(
+                        user_id=user_id,
+                        description=pattern_info.get("description", ""),
+                        paper_ids=pattern_paper_ids,
+                    )
+                    created_patterns.append({
+                        "id": pattern.id,
+                        "description": pattern.description,
+                    })
+
+                return {
+                    "patterns": created_patterns,
+                    "message": f"Identified {len(created_patterns)} patterns",
+                }
+        except json.JSONDecodeError:
+            pass
+
+        return {"patterns": [], "message": "Could not parse pattern analysis"}
 
     async def handle_briefing_generation(session: AsyncSession, input_data: dict) -> dict:
         """Handle briefing generation operation."""
