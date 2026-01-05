@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* PDF viewer container */
+.pdf-container {
+  @apply relative w-full h-full overflow-auto bg-gray-100;
+}
+
+.pdf-page {
+  @apply mx-auto my-4 shadow-lg bg-white;
+}
+
+/* Annotation highlight */
+.annotation-highlight {
+  @apply absolute bg-yellow-200/50 cursor-pointer transition-colors;
+}
+
+.annotation-highlight:hover {
+  @apply bg-yellow-300/50;
+}
