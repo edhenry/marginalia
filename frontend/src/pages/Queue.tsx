@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Search, Filter, Archive, ExternalLink } from 'lucide-react';
+import { Plus, Search, Filter, Archive, ExternalLink, Upload, FileText, Link as LinkIcon } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { papersApi, syncApi } from '../services/api';
 import type { Paper, PaperStatus } from '../types';
@@ -108,6 +108,8 @@ function PaperRow({ paper, onArchive }: { paper: Paper; onArchive: () => void })
   );
 }
 
+type AddMode = 'arxiv' | 'upload';
+
 function AddPaperDialog({
   open,
   onClose,
@@ -115,7 +117,14 @@ function AddPaperDialog({
   open: boolean;
   onClose: () => void;
 }) {
+  const [mode, setMode] = useState<AddMode>('arxiv');
   const [arxivId, setArxivId] = useState('');
+  const [pdfFile, setPdfFile] = useState<File | null>(null);
+  const [title, setTitle] = useState('');
+  const [authors, setAuthors] = useState('');
+  const [year, setYear] = useState('');
+  const [venue, setVenue] = useState('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
 
   const importMutation = useMutation({
@@ -123,56 +132,230 @@ function AddPaperDialog({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['queue'] });
       queryClient.invalidateQueries({ queryKey: ['papers'] });
-      setArxivId('');
+      resetForm();
       onClose();
     },
   });
 
+  const uploadMutation = useMutation({
+    mutationFn: async () => {
+      if (!pdfFile || !title) throw new Error('PDF and title required');
+      return papersApi.uploadPaper(pdfFile, {
+        title,
+        authors: authors.split(',').map((a) => a.trim()).filter(Boolean),
+        year: year ? parseInt(year, 10) : undefined,
+        venue: venue || undefined,
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['queue'] });
+      queryClient.invalidateQueries({ queryKey: ['papers'] });
+      resetForm();
+      onClose();
+    },
+  });
+
+  const resetForm = () => {
+    setArxivId('');
+    setPdfFile(null);
+    setTitle('');
+    setAuthors('');
+    setYear('');
+    setVenue('');
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setPdfFile(file);
+      // Try to extract title from filename
+      if (!title) {
+        const nameWithoutExt = file.name.replace(/\.pdf$/i, '');
+        setTitle(nameWithoutExt);
+      }
+    }
+  };
+
   if (!open) return null;
+
+  const isLoading = importMutation.isPending || uploadMutation.isPending;
+  const error = importMutation.error || uploadMutation.error;
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
       <div className="bg-white rounded-lg p-6 w-full max-w-md">
         <h2 className="text-lg font-semibold mb-4">Add Paper</h2>
 
-        <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              arXiv ID
-            </label>
-            <input
-              type="text"
-              value={arxivId}
-              onChange={(e) => setArxivId(e.target.value)}
-              placeholder="e.g., 2301.12345"
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              Enter the arXiv ID to import the paper
-            </p>
-          </div>
+        {/* Mode tabs */}
+        <div className="flex mb-4 border-b border-gray-200">
+          <button
+            onClick={() => setMode('arxiv')}
+            className={clsx(
+              'flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors',
+              mode === 'arxiv'
+                ? 'border-primary-600 text-primary-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
+            )}
+          >
+            <LinkIcon size={16} />
+            From arXiv
+          </button>
+          <button
+            onClick={() => setMode('upload')}
+            className={clsx(
+              'flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors',
+              mode === 'upload'
+                ? 'border-primary-600 text-primary-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
+            )}
+          >
+            <Upload size={16} />
+            Upload PDF
+          </button>
+        </div>
 
-          {importMutation.isError && (
+        <div className="space-y-4">
+          {mode === 'arxiv' ? (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                arXiv ID
+              </label>
+              <input
+                type="text"
+                value={arxivId}
+                onChange={(e) => setArxivId(e.target.value)}
+                placeholder="e.g., 2301.12345"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Enter the arXiv ID to import paper and PDF
+              </p>
+            </div>
+          ) : (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  PDF File
+                </label>
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  accept=".pdf"
+                  onChange={handleFileChange}
+                  className="hidden"
+                />
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className={clsx(
+                    'w-full p-4 border-2 border-dashed rounded-lg transition-colors text-center',
+                    pdfFile
+                      ? 'border-primary-300 bg-primary-50'
+                      : 'border-gray-300 hover:border-gray-400'
+                  )}
+                >
+                  {pdfFile ? (
+                    <div className="flex items-center justify-center gap-2">
+                      <FileText size={20} className="text-primary-600" />
+                      <span className="text-sm text-primary-700">{pdfFile.name}</span>
+                    </div>
+                  ) : (
+                    <div>
+                      <Upload className="mx-auto mb-2 text-gray-400" size={24} />
+                      <p className="text-sm text-gray-500">Click to select PDF</p>
+                    </div>
+                  )}
+                </button>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Title *
+                </label>
+                <input
+                  type="text"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="Paper title"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Authors
+                </label>
+                <input
+                  type="text"
+                  value={authors}
+                  onChange={(e) => setAuthors(e.target.value)}
+                  placeholder="Author 1, Author 2, ..."
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Year
+                  </label>
+                  <input
+                    type="number"
+                    value={year}
+                    onChange={(e) => setYear(e.target.value)}
+                    placeholder="2024"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Venue
+                  </label>
+                  <input
+                    type="text"
+                    value={venue}
+                    onChange={(e) => setVenue(e.target.value)}
+                    placeholder="Conference/Journal"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
+                  />
+                </div>
+              </div>
+            </>
+          )}
+
+          {error && (
             <p className="text-sm text-red-600">
-              {(importMutation.error as Error).message}
+              {(error as Error).message}
             </p>
           )}
         </div>
 
         <div className="flex justify-end gap-3 mt-6">
           <button
-            onClick={onClose}
+            onClick={() => {
+              resetForm();
+              onClose();
+            }}
             className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg"
           >
             Cancel
           </button>
-          <button
-            onClick={() => importMutation.mutate(arxivId)}
-            disabled={!arxivId || importMutation.isPending}
-            className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50"
-          >
-            {importMutation.isPending ? 'Importing...' : 'Import'}
-          </button>
+          {mode === 'arxiv' ? (
+            <button
+              onClick={() => importMutation.mutate(arxivId)}
+              disabled={!arxivId || isLoading}
+              className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50"
+            >
+              {importMutation.isPending ? 'Importing...' : 'Import from arXiv'}
+            </button>
+          ) : (
+            <button
+              onClick={() => uploadMutation.mutate()}
+              disabled={!pdfFile || !title || isLoading}
+              className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50"
+            >
+              {uploadMutation.isPending ? 'Uploading...' : 'Upload Paper'}
+            </button>
+          )}
         </div>
       </div>
     </div>
